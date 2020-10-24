@@ -35,7 +35,9 @@ async function example() {
 
     console.log('oh hello ' + conn.user.name + ' (' + conn.user.jid + ')')
     console.log('you have ' + conn.chats.length + ' chats & ' + Object.keys(conn.contacts).length + ' contacts')
-    
+    const id = '60145407683@s.whatsapp.net'
+    const exists = await conn.isOnWhatsApp (id)
+    console.log (`${id} ${exists ? " exists " : " does not exist"} on WhatsApp`)
     // uncomment to load all unread messages
     //const unread = await conn.loadAllUnreadMessages ()
     //console.log ('you have ' + unread.length + ' unread messages')

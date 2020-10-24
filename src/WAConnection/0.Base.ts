@@ -30,11 +30,12 @@ import pino from 'pino'
 
 const logger = pino({ prettyPrint: { levelFirst: true, ignore: 'hostname', translateTime: true },  prettifier: require('pino-pretty') })
 
+
 export class WAConnection extends EventEmitter {
     /** The version of WhatsApp Web we're telling the servers we are */
     version: [number, number, number] = [2, 2041, 6]
     /** The Browser we're telling the WhatsApp Web servers we are */
-    browserDescription: [string, string, string] = Utils.Browsers.baileys ('Chrome')
+    browserDescription: [string, string, string] = Utils.Browsers.ubuntu ('Chrome')
     /** Metadata like WhatsApp id, name set on WhatsApp etc. */
     user: WAUser
     /** Should requests be queued when the connection breaks in between; if 0, then an error will be thrown */
