@@ -1,26 +1,23 @@
 import * as assert from 'assert'
-import {WAConnection} from '../WAConnection/WAConnection'
-import { AuthenticationCredentialsBase64, BaileysError, ReconnectMode, DisconnectReason } from '../WAConnection/Constants'
+import {WAConnection} from '../WAConnection'
+import { AuthenticationCredentialsBase64, BaileysError, ReconnectMode, DisconnectReason, WAChat, WAContact } from '../WAConnection/Constants'
 import { delay } from '../WAConnection/Utils'
-import { assertChatDBIntegrity, testJid } from './Common'
+import { assertChatDBIntegrity, makeConnection, testJid } from './Common'
 
 describe('QR Generation', () => {
     it('should generate QR', async () => {
-        const conn = new WAConnection()
-        conn.connectOptions.regenerateQRIntervalMs = 5000
+        const conn = makeConnection ()
+        conn.connectOptions.maxRetries = 0
 
         let calledQR = 0
         conn.removeAllListeners ('qr')
-        conn.on ('qr', qr => calledQR += 1)
+        conn.on ('qr', () => calledQR += 1)
         
         await conn.connect()
             .then (() => assert.fail('should not have succeeded'))
-            .catch (error => {
-                assert.equal (error.message, 'timed out')
-            })
-        assert.deepEqual (conn['pendingRequests'], [])
-        assert.deepEqual (
-            Object.keys(conn['callbacks']).filter(key => !key.startsWith('function:')), 
+            .catch (error => {})
+        assert.deepStrictEqual (
+            Object.keys(conn.eventNames()).filter(key => key.startsWith('TAG:')), 
             []
         )
         assert.ok(calledQR >= 2, 'QR not called')
@@ -32,7 +29,7 @@ describe('Test Connect', () => {
     it('should connect', async () => {
         console.log('please be ready to scan with your phone')
         
-        const conn = new WAConnection()
+        const conn = makeConnection ()
 
         let credentialsUpdateCalled = false
         conn.on ('credentials-updated', () => credentialsUpdateCalled = true)
@@ -48,8 +45,8 @@ describe('Test Connect', () => {
         conn.close()
         auth = conn.base64EncodedAuthInfo()
     })
-    it('should reconnect', async () => {
-        const conn = new WAConnection()
+    it('should restore session', async () => {
+        const conn = makeConnection ()
 
         let credentialsUpdateCalled = false
         conn.on ('credentials-updated', () => credentialsUpdateCalled = true)
@@ -72,17 +69,17 @@ describe('Test Connect', () => {
         conn.close()
     })
     it ('should disconnect & reconnect phone', async () => {
-        const conn = new WAConnection ()
+        const conn = makeConnection ()
         conn.logger.level = 'debug'
         await conn.loadAuthInfo('./auth_info.json').connect ()
-        assert.equal (conn.phoneConnected, true)
+        assert.strictEqual (conn.phoneConnected, true)
 
         try {
             const waitForEvent = expect => new Promise (resolve => {
                 conn.on ('connection-phone-change', ({connected}) => {
                     if (connected === expect) {
                         conn.removeAllListeners ('connection-phone-change')
-                        resolve ()
+                        resolve(undefined)
                     }
                 })
             })
@@ -116,26 +113,30 @@ describe('Test Connect', () => {
 describe ('Reconnects', () => {
     const verifyConnectionOpen = async (conn: WAConnection) => {
         assert.ok (conn.user.jid)
+        let failed = false
         // check that the connection stays open
-        conn.on ('close', ({reason}) => (
-            reason !== DisconnectReason.intentional && assert.fail ('should not have closed again')
-        ))
+        conn.on ('close', ({reason}) => {
+            if(reason !== DisconnectReason.intentional) failed = true
+        })
         await delay (60*1000)
 
         const status = await conn.getStatus ()
         assert.ok (status)
+        assert.ok (!conn['debounceTimeout']) // this should be null
 
         conn.close ()
+
+        if (failed) assert.fail ('should not have closed again')
     }
     it('should dispose correctly on bad_session', async () => {
-        const conn = new WAConnection()
+        const conn = makeConnection ()
         conn.autoReconnect = ReconnectMode.onAllErrors
         conn.loadAuthInfo ('./auth_info.json')
 
         let gotClose0 = false
         let gotClose1 = false
 
-        conn.on ('intermediate-close', ({ reason }) => {
+        conn.on ('ws-close', ({ reason }) => {
             gotClose0 = true
         })
         conn.on ('close', ({ reason }) => {
@@ -160,7 +161,7 @@ describe ('Reconnects', () => {
      * and see if the library cleans up resources correctly
      */
     it('should cleanup correctly', async () => {
-        const conn = new WAConnection()
+        const conn = makeConnection ()
         conn.autoReconnect = ReconnectMode.onAllErrors
         conn.loadAuthInfo ('./auth_info.json')
 
@@ -184,7 +185,8 @@ describe ('Reconnects', () => {
      * and see if the library cleans up resources correctly
      */
     it('should disrupt connect loop', async () => {
-        const conn = new WAConnection()
+        const conn = makeConnection ()
+
         conn.autoReconnect = ReconnectMode.onAllErrors
         conn.loadAuthInfo ('./auth_info.json')
 
@@ -194,7 +196,7 @@ describe ('Reconnects', () => {
             while (!conn['conn']) {
                 await delay(100)
             }
-            conn['conn'].terminate ()
+            conn['conn'].close ()
 
             while (conn['conn']) {
                 await delay(100)
@@ -211,11 +213,11 @@ describe ('Reconnects', () => {
         await verifyConnectionOpen (conn)
     })
     it ('should reconnect on broken connection', async () => {
-        const conn = new WAConnection ()
+        const conn = makeConnection ()
         conn.autoReconnect = ReconnectMode.onConnectionLost
 
         await conn.loadAuthInfo('./auth_info.json').connect ()
-        assert.equal (conn.phoneConnected, true)
+        assert.strictEqual (conn.phoneConnected, true)
 
         try {
             const closeConn = () => conn['conn']?.terminate ()
@@ -232,7 +234,7 @@ describe ('Reconnects', () => {
                     if (closes >= 1) {
                         conn.removeAllListeners ('close')
                         conn.removeAllListeners ('connecting')
-                        resolve ()
+                        resolve(undefined)
                     }
                 })
                 conn.on ('connecting', () => {
@@ -247,7 +249,7 @@ describe ('Reconnects', () => {
             await new Promise (resolve => {
                 conn.on ('open', () => {
                     conn.removeAllListeners ('open')
-                    resolve ()
+                    resolve(undefined)
                 })
             })
 
@@ -263,11 +265,11 @@ describe ('Reconnects', () => {
         }
     })
     it ('should reconnect & stay connected', async () => {
-        const conn = new WAConnection ()
+        const conn = makeConnection ()
         conn.autoReconnect = ReconnectMode.onConnectionLost
 
         await conn.loadAuthInfo('./auth_info.json').connect ()
-        assert.equal (conn.phoneConnected, true)
+        assert.strictEqual (conn.phoneConnected, true)
 
         await delay (30*1000)
 
@@ -283,17 +285,14 @@ describe ('Reconnects', () => {
 })
 
 describe ('Pending Requests', () => {
-    it ('should correctly send updates', async () => {
-        const conn = new WAConnection ()
+    it ('should correctly send updates for chats', async () => {
+        const conn = makeConnection ()
         conn.pendingRequestTimeoutMs = null
-
         conn.loadAuthInfo('./auth_info.json')
+
+        const task = new Promise(resolve => conn.once('chats-received', resolve))
         await conn.connect ()
-
-        conn.close ()
-
-        const result0 = await conn.connect ()
-        assert.deepEqual (result0.updatedChats, {})
+        await task
 
         conn.close ()
 
@@ -301,24 +300,59 @@ describe ('Pending Requests', () => {
         oldChat.archive = 'true' // mark the first chat as archived
         oldChat.modify_tag = '1234' // change modify tag to detect change
 
-        // close the socket after a few seconds second to see if updates are correct after a reconnect
-        setTimeout (() => conn['conn'].close(), 5000) 
+        const promise = new Promise(resolve => conn.once('chats-update', resolve))
 
         const result = await conn.connect ()
         assert.ok (!result.newConnection)
 
-        const chat = result.updatedChats[oldChat.jid]
+        const chats = await promise as Partial<WAChat>[]
+        const chat = chats.find (c => c.jid === oldChat.jid)
         assert.ok (chat)
         
         assert.ok ('archive' in chat)
-        assert.equal (Object.keys(chat).length, 2)
+        assert.strictEqual (Object.keys(chat).length, 3)
+        assert.strictEqual (Object.keys(chats).length, 1)
 
-        assert.equal (Object.keys(result.updatedChats).length, 1)
+        conn.close ()
+    })
+    it ('should correctly send updates for contacts', async () => {
+        const conn = makeConnection ()
+        conn.pendingRequestTimeoutMs = null
+        conn.loadAuthInfo('./auth_info.json')
+
+        const task: any = new Promise(resolve => conn.once('contacts-received', resolve))
+        await conn.connect ()
+        const initialResult = await task
+        assert.strictEqual(
+            initialResult.updatedContacts.length,
+            Object.keys(conn.contacts).length
+        )
+
+
+        conn.close ()
+
+        const [jid] = Object.keys(conn.contacts)
+        const oldContact = conn.contacts[jid]
+        oldContact.name = 'Lol'
+        oldContact.index = 'L'
+
+        const promise = new Promise(resolve => conn.once('contacts-received', resolve))
+
+        const result = await conn.connect ()
+        assert.ok (!result.newConnection)
+
+        const {updatedContacts} = await promise as { updatedContacts: Partial<WAContact>[] }
+        const contact = updatedContacts.find (c => c.jid === jid)
+        assert.ok (contact)
+        
+        assert.ok ('name' in contact)
+        assert.strictEqual (Object.keys(contact).length, 3)
+        assert.strictEqual (Object.keys(updatedContacts).length, 1)
 
         conn.close ()
     })
     it('should queue requests when closed', async () => {
-          const conn = new WAConnection ()
+          const conn = makeConnection ()
           //conn.pendingRequestTimeoutMs = null
 
           await conn.loadAuthInfo('./auth_info.json').connect ()
@@ -338,4 +372,36 @@ describe ('Pending Requests', () => {
 
           conn.close ()
     })
+    it('[MANUAL] should receive query response after phone disconnect', async () => {
+        const conn = makeConnection ()
+        await conn.loadAuthInfo('./auth_info.json').connect ()
+
+        console.log(`disconnect your phone from the internet!`)
+        await delay(5000)
+        const task = conn.loadMessages(testJid, 50)
+        setTimeout(() => console.log('reconnect your phone!'), 20_000)
+
+        const result = await task
+        assert.ok(result.messages[0])
+        assert.ok(!conn['phoneCheckInterval']) // should be undefined
+
+        conn.close ()
+    })
+    it('should re-execute query on connection closed error', async () => {
+        const conn = makeConnection ()
+        //conn.pendingRequestTimeoutMs = 10_000
+        await conn.loadAuthInfo('./auth_info.json').connect ()
+        const task: Promise<any> = conn.query({json: ['query', 'Status', conn.user.jid], waitForOpen: true})
+        
+        await delay(20)
+        conn['onMessageRecieved']('1234,["Pong",false]') // fake cancel the connection
+
+        await delay(2000)
+
+        const json = await task
+        
+        assert.ok (json.status)
+
+        conn.close ()
+  })
 })

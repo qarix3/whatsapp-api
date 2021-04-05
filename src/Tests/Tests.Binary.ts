@@ -78,11 +78,11 @@ describe('Binary Coding Tests', () => {
         testVectors.forEach(pair => {
             const buff = Buffer.from(pair[0], 'hex')
             const decoded = decoder.read(buff)
-
-            assert.deepEqual(JSON.stringify(decoded), JSON.stringify(pair[1]))
+            //console.log((decoded[2][0][2]))
+            assert.deepStrictEqual(decoded, pair[1])
 
             const encoded = encoder.write(decoded)
-            assert.deepEqual(encoded, buff)
+            assert.deepStrictEqual(encoded, buff)
         })
         console.log('all coding tests passed')
     })

@@ -1,104 +1,117 @@
 import * as Curve from 'curve25519-js'
 import * as Utils from './Utils'
 import {WAConnection as Base} from './0.Base'
-import { WAMetric, WAFlag, BaileysError, Presence, WAUser } from './Constants'
+import { WAMetric, WAFlag, BaileysError, Presence, WAUser, WAInitResponse, WAOpenResult } from './Constants'
 
 export class WAConnection extends Base {
-    
+
     /** Authenticate the connection */
-    protected async authenticate (startDebouncedTimeout: () => void, stopDebouncedTimeout: () => void, reconnect?: string) {
+    protected async authenticate (reconnect?: string) {
         // if no auth info is present, that is, a new session has to be established
         // generate a client ID
         if (!this.authInfo?.clientID) {
             this.authInfo = { clientID: Utils.generateClientID() } as any
         }
-
-        const canLogin = this.authInfo?.encKey && this.authInfo?.macKey        
+        const canLogin = this.canLogin()      
         this.referenceDate = new Date () // refresh reference date
 
-        startDebouncedTimeout ()
+        this.connectionDebounceTimeout.start()
         
-        const initQueries = [
-            (async () => {
-                const {ref} = await this.query({
-                    json: ['admin', 'init', this.version, this.browserDescription, this.authInfo?.clientID, true], 
-                    expect200: true, 
-                    waitForOpen: false, 
-                    longTag: true,
-                    requiresPhoneConnection: false
-                })
-                if (!canLogin) {
-                    stopDebouncedTimeout () // stop the debounced timeout for QR gen
-                    const result = await this.generateKeysForAuth (ref)
-                    startDebouncedTimeout () // restart debounced timeout
-                    return result
-                }
-            })()
-        ]
+        const initQuery = (async () => {
+            const {ref, ttl} = await this.query({
+                json: ['admin', 'init', this.version, this.browserDescription, this.authInfo?.clientID, true], 
+                expect200: true, 
+                waitForOpen: false, 
+                longTag: true,
+                requiresPhoneConnection: false,
+                startDebouncedTimeout: true
+            }) as WAInitResponse
+
+            if (!canLogin) {
+                this.connectionDebounceTimeout.cancel() // stop the debounced timeout for QR gen
+                this.generateKeysForAuth (ref, ttl)
+            }
+        })();
+        let loginTag: string
         if (canLogin) {
             // if we have the info to restore a closed session
-            initQueries.push (
-                (async () => {
-                    const json = [
-                        'admin',
-                        'login',
-                        this.authInfo?.clientToken,
-                        this.authInfo?.serverToken,
-                        this.authInfo?.clientID,
-                    ]
-                    if (reconnect) json.push(...['reconnect', reconnect.replace('@s.whatsapp.net', '@c.us')])
-                    else json.push ('takeover')
-                    
-                    let response = await this.query({ json, tag: 's1', waitForOpen: false, expect200: true, longTag: true, requiresPhoneConnection: false }) // wait for response with tag "s1"
-                    // if its a challenge request (we get it when logging in)
-                    if (response[1]?.challenge) {
-                        await this.respondToChallenge(response[1].challenge)
-                        response = await this.waitForMessage('s2', [], true)
-                    }
-                    return response
-                })()
-            )
+            const json = [
+                'admin',
+                'login',
+                this.authInfo?.clientToken,
+                this.authInfo?.serverToken,
+                this.authInfo?.clientID,
+            ]
+            loginTag = this.generateMessageTag(true)
+            
+            if (reconnect) json.push(...['reconnect', reconnect.replace('@s.whatsapp.net', '@c.us')])
+            else json.push ('takeover')
+            // send login every 10s
+            const sendLoginReq = () => {
+                if (!this.conn || this.conn?.readyState !== this.conn.OPEN) {
+                    this.logger.warn('Received login timeout req when WS not open, ignoring...')
+                    return
+                }
+                if (this.state === 'open') {
+                    this.logger.warn('Received login timeout req when state=open, ignoring...')
+                    return
+                }
+                this.logger.debug('sending login request')
+                this.sendJSON(json, loginTag)
+                this.initTimeout = setTimeout(sendLoginReq, 10_000)
+            }
+            sendLoginReq()
         }
+                        
+        await initQuery
 
-        const validationJSON = (await Promise.all (initQueries)).slice(-1)[0] // get the last result
-        this.user = await this.validateNewConnection(validationJSON[1]) // validate the connection
+        // wait for response with tag "s1"
+        let response = await Promise.race(
+            [
+                this.waitForMessage('s1', false, undefined),
+                loginTag && this.waitForMessage(loginTag, false, undefined)
+            ]
+            .filter(Boolean)
+        )
+        this.connectionDebounceTimeout.start()
+        this.initTimeout && clearTimeout (this.initTimeout)
+        this.initTimeout = null
+
+        if (response.status && response.status !== 200) {
+            throw new BaileysError(`Unexpected error in login`, { response, status: response.status })
+        }
+        // if its a challenge request (we get it when logging in)
+        if (response[1]?.challenge) {
+            await this.respondToChallenge(response[1].challenge)
+            response = await this.waitForMessage('s2', true)
+        }
+        
+        const result = this.validateNewConnection(response[1])// validate the connection
+        if (result.user.jid !== this.user?.jid) {
+            result.isNewUser = true
+            // clear out old data
+            this.chats.clear()
+            this.contacts = {}
+        }
+        this.user = result.user
         
         this.logger.info('validated connection successfully')
-        this.emit ('connection-validated', this.user)
-
-        const response = await this.query({ json: ['query', 'ProfilePicThumb', this.user.jid], waitForOpen: false, expect200: false, requiresPhoneConnection: false })
-        this.user.imgUrl = response?.eurl || ''
-
-        this.sendPostConnectQueries ()
-
-        this.logger.debug('sent init queries')
-    }
-    /**
-     * Send the same queries WA Web sends after connect
-     */
-    sendPostConnectQueries () {
-        this.sendBinary (['query', {type: 'contacts', epoch: '1'}, null], [ WAMetric.queryContact, WAFlag.ignore ])
-        this.sendBinary (['query', {type: 'chat', epoch: '1'}, null], [ WAMetric.queryChat, WAFlag.ignore ])
-        this.sendBinary (['query', {type: 'status', epoch: '1'}, null], [ WAMetric.queryStatus, WAFlag.ignore ])
-        this.sendBinary (['query', {type: 'quick_reply', epoch: '1'}, null], [ WAMetric.queryQuickReply, WAFlag.ignore ])
-        this.sendBinary (['query', {type: 'label', epoch: '1'}, null], [ WAMetric.queryLabel, WAFlag.ignore ])
-        this.sendBinary (['query', {type: 'emoji', epoch: '1'}, null], [ WAMetric.queryEmoji, WAFlag.ignore ])
-        this.sendBinary (['action', {type: 'set', epoch: '1'}, [['presence', {type: Presence.available}, null]] ], [ WAMetric.presence, 160 ])
+        
+        return result
     }
     /** 
      * Refresh QR Code 
      * @returns the new ref
      */
-    async generateNewQRCodeRef() {
+    async requestNewQRCodeRef() {
         const response = await this.query({
             json: ['admin', 'Conn', 'reref'], 
             expect200: true, 
             waitForOpen: false, 
             longTag: true,
-            timeoutMs: this.connectOptions.maxIdleTimeMs,
             requiresPhoneConnection: false
         })
-        return response.ref as string
+        return response as WAInitResponse
     }
     /**
      * Once the QR code is scanned and we can validate our connection, or we resolved the challenge when logging back in
@@ -108,25 +121,22 @@ export class WAConnection extends Base {
     private validateNewConnection(json) {
         // set metadata: one's WhatsApp ID [cc][number]@s.whatsapp.net, name on WhatsApp, info about the phone
         const onValidationSuccess = () => ({
-            jid: Utils.whatsappID(json.wid),
-            name: json.pushname,
-            phone: json.phone,
-            imgUrl: null
-        }) as WAUser
+            user: {
+                jid: Utils.whatsappID(json.wid),
+                name: json.pushname,
+                phone: json.phone,
+                imgUrl: null
+            },
+            auth: this.authInfo
+        }) as WAOpenResult
 
         if (!json.secret) {
-            let credsChanged = false
             // if we didn't get a secret, we don't need it, we're validated
             if (json.clientToken && json.clientToken !== this.authInfo.clientToken) {
                 this.authInfo = { ...this.authInfo, clientToken: json.clientToken }
-                credsChanged = true
             }
             if (json.serverToken && json.serverToken !== this.authInfo.serverToken) {
                 this.authInfo = { ...this.authInfo, serverToken: json.serverToken }
-                credsChanged = true
-            }
-            if (credsChanged) {
-                this.emit ('credentials-updated', this.authInfo)
             }
             return onValidationSuccess()
         }
@@ -167,8 +177,6 @@ export class WAConnection extends Base {
             serverToken: json.serverToken,
             clientID: this.authInfo.clientID,
         }
-        
-        this.emit ('credentials-updated', this.authInfo)
         return onValidationSuccess()
     }
     /**
@@ -181,44 +189,36 @@ export class WAConnection extends Base {
         const json = ['admin', 'challenge', signed, this.authInfo.serverToken, this.authInfo.clientID] // prepare to send this signed string with the serverToken & clientID
         
         this.logger.info('resolving login challenge')
-        return this.query({json, expect200: true, waitForOpen: false})
+        return this.query({json, expect200: true, waitForOpen: false, startDebouncedTimeout: true})
     }
     /** When starting a new session, generate a QR code by generating a private/public key pair & the keys the server sends */
-    protected async generateKeysForAuth(ref: string) {
+    protected generateKeysForAuth(ref: string, ttl?: number) {
         this.curveKeys = Curve.generateKeyPair(Utils.randomBytes(32))
         const publicKey = Buffer.from(this.curveKeys.public).toString('base64')
 
-        const emitQR = () => {
+        const qrLoop = ttl => {
             const qr = [ref, publicKey, this.authInfo.clientID].join(',')
             this.emit ('qr', qr)
-        }
 
-        const regenQR = () => {
-            this.qrTimeout = setTimeout (() => {
+            this.initTimeout = setTimeout (async () => {
                 if (this.state === 'open') return
 
-                this.logger.debug ('regenerated QR')
-                
-                this.generateNewQRCodeRef ()
-                .then (newRef => ref = newRef)
-                .then (emitQR)
-                .then (regenQR)
-                .catch (error => {
-                    this.logger.error ({ error }, `error in QR gen`)
-                    if (error.status === 429) { // too many QR requests
-                        this.endConnection ()
+                this.logger.debug ('regenerating QR')
+                try {
+                    const {ref: newRef, ttl: newTTL} = await this.requestNewQRCodeRef()
+                    ttl = newTTL
+                    ref = newRef
+                } catch (error) {
+                    this.logger.warn ({ error }, `error in QR gen`)
+                    // @ts-ignore
+                    if (error.status === 429 && this.state !== 'open') { // too many QR requests
+                        this.endConnection(error.message)
+                        return
                     }
-                })
-            }, this.connectOptions.regenerateQRIntervalMs)
+                }
+                qrLoop (ttl)
+            }, ttl || 20_000) // default is 20s, on the off-chance ttl is not present
         }
-
-        emitQR ()
-        if (this.connectOptions.regenerateQRIntervalMs) regenQR ()
-
-        const json = await this.waitForMessage('s1', [], false)
-        this.qrTimeout && clearTimeout (this.qrTimeout)
-        this.qrTimeout = null
-        
-        return json
+        qrLoop (ttl)
     }
 }

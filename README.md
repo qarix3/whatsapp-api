@@ -6,9 +6,10 @@
 
  Baileys is type-safe, extensible and simple to use. If you require more functionality than provided, it'll super easy for you to write an extension. More on this [here](#WritingCustomFunctionality).
  
- If you're interested in building a WhatsApp bot, you may wanna check out [WhatsAppInfoBot](https://github.com/adiwajshing/WhatsappInfoBot) and an actual bot built with it, [Messcat](https://github.com/adiwajshing/Messcat).
+ If you're interested in building a WhatsApp bot, you may wanna check out [WhatsAppInfoBot](https://github.com/adiwajshing/WhatsappInfoBot) and an actual bot built with it, [Messcat](https://github.com/ashokatechmin/Messcat).
  
  **Read the docs [here](https://adiwajshing.github.io/Baileys)**
+ **Join the Discord [here](https://discord.gg/7FYURJyqng)**
 
 ## Example
 Do check out & run [example.ts](Example/example.ts) to see example usage of the library.
@@ -23,7 +24,7 @@ Create and cd to your NPM project directory and then in terminal, write:
 1. stable: `npm install @adiwajshing/baileys`
 2. stabl-ish w quicker fixes & latest features: `npm install github:adiwajshing/baileys` 
 
-Do note, the library will most likely vary if you're using the NPM package, read that [here](https://www.npmjs.com/package/@adiwajshing/baileys)
+Do note, the library will likely vary if you're using the NPM package, read that [here](https://www.npmjs.com/package/@adiwajshing/baileys)
 
 Then import in your code using:
 ``` ts 
@@ -42,14 +43,29 @@ import { WAConnection } from '@adiwajshing/baileys'
 
 async function connectToWhatsApp () {
     const conn = new WAConnection() 
-    
-    await conn.connect ()
-    console.log ("oh hello " + conn.user.name + " (" + conn.user.id + ")")
-    // every chat object has a list of most recent messages
-    console.log ("you have " + conn.chats.all().length + " chats")
+    // called when WA sends chats
+    // this can take up to a few minutes if you have thousands of chats!
+    conn.on('chats-received', async ({ hasNewChats }) => {
+        console.log(`you have ${conn.chats.length} chats, new chats available: ${hasNewChats}`)
 
-    const unread = await conn.loadAllUnreadMessages ()
-    console.log ("you have " + unread.length + " unread messages")
+        const unread = await conn.loadAllUnreadMessages ()
+        console.log ("you have " + unread.length + " unread messages")
+    })
+    // called when WA sends chats
+    // this can take up to a few minutes if you have thousands of contacts!
+    conn.on('contacts-received', () => {
+        console.log('you have ' + Object.keys(conn.contacts).length + ' contacts')
+    })
+
+    await conn.connect ()
+    conn.on('chat-update', chatUpdate => {
+        // `chatUpdate` is a partial object, containing the updated properties of the chat
+        // received a new message
+        if (chatUpdate.messages && chatUpdate.count) {
+            const message = chatUpdate.messages.all()[0]
+            console.log (message)
+        } else console.log (chatUpdate) // see updates (can be archived, pinned etc.)
+    })
 }
 // run in main file
 connectToWhatsApp ()
@@ -58,12 +74,7 @@ connectToWhatsApp ()
 
 If the connection is successful, you will see a QR code printed on your terminal screen, scan it with WhatsApp on your phone and you'll be logged in!
 
-If you don't want to wait for WhatsApp to send all your chats while connecting, you can set the following property to false:
-``` ts
-conn.connectOptions.waitForChats = false
-``` 
-
-Do note, the `chats` object returned is now a [KeyedDB](https://github.com/adiwajshing/keyed-db). This is done for the following reasons:
+Do note, the `conn.chats` object is a [KeyedDB](https://github.com/adiwajshing/keyed-db). This is done for the following reasons:
 - Most applications require chats to be ordered in descending order of time. (`KeyedDB` does this in `log(N)` time)
 - Most applications require pagination of chats (Use `chats.paginated()`)
 - Most applications require **O(1)** access to chats via the chat ID. (Use `chats.get(jid)` with `KeyedDB`)
@@ -85,29 +96,18 @@ console.log ("oh hello " + conn.user.name + "! You connected via a proxy")
 The entire `WAConnectOptions` struct is mentioned here with default values:
 ``` ts
 conn.connectOptions = {
-    /** New QR generation interval, set to null if you don't want to regenerate */
-    regenerateQRIntervalMs?: 30_000
     /** fails the connection if no data is received for X seconds */
-    maxIdleTimeMs?: 15_000
+    maxIdleTimeMs?: 60_000,
     /** maximum attempts to connect */
-    maxRetries?: 5
-    /** should the chats be waited for; 
-     * should generally keep this as true, unless you only care about sending & receiving new messages 
-     * & don't care about chat history
-     * */
-    waitForChats?: true
-    /** if set to true, the connect only waits for the last message of the chat
-     * setting to false, generally yields a faster connect
-     */
-    waitOnlyForLastMessage?: false
+    maxRetries?: 10,
     /** max time for the phone to respond to a connectivity test */
-    phoneResponseTime?: 10_000
+    phoneResponseTime?: 15_000,
     /** minimum time between new connections */
-    connectCooldownMs?: 3000
+    connectCooldownMs?: 4000,
     /** agent used for WS connections (could be a proxy agent) */
-    agent?: Agent = undefined
+    agent?: Agent = undefined,
     /** agent used for fetch requests -- uploading/downloading media */
-    fetchAgent?: Agent = undefined
+    fetchAgent?: Agent = undefined,
     /** always uses takeover for connecting */
     alwaysUseTakeover: true
 } as WAConnectOptions
@@ -151,7 +151,7 @@ await conn.connect() // works the same
 ```
 See the browser credentials type in the docs.
 
-**Note**: Upon every successive connection, WA can update part of the stored credentials. Whenever that happens, the `credentials-updated` event is triggered, and you should probably update your saved credentials upon receiving that event. Not doing so *may* lead WA to log you out after a few weeks with a 419 error code.
+**Note**: Upon every successive connection, WA can update part of the stored credentials. Whenever that happens, the credentials are uploaded, and you should probably update your saved credentials upon receiving the `open` event. Not doing so *may* lead WA to log you out after a few weeks with a 419 error code.
 
 ## QR Callback
 
@@ -161,12 +161,6 @@ conn.on('qr', qr => {
     // Now, use the 'qr' string to display in QR UI or send somewhere
 }
 await conn.connect ()
-```
-
-The QR will auto-regenerate and will fire a new `qr` event after 30 seconds, if you don't want to regenerate or want to change the re-gen interval:
-``` ts
-conn.regenerateQRIntervalMs = null // no QR regen
-conn.regenerateQRIntervalMs = 20000 // QR regen every 20 seconds
 ```
 
 ## Handling Events
@@ -183,53 +177,50 @@ on (event: 'open', listener: (result: WAOpenResult) => void): this
 on (event: 'connecting', listener: () => void): this
 /** when the connection has closed */
 on (event: 'close', listener: (err: {reason?: DisconnectReason | string, isReconnecting: boolean}) => void): this
-/** when the connection has closed */
-on (event: 'intermediate-close', listener: (err: {reason?: DisconnectReason | string}) => void): this
-/** when WA updates the credentials */
-on (event: 'credentials-updated', listener: (auth: AuthenticationCredentials) => void): this
+/** when the socket is closed */
+on (event: 'ws-close', listener: (err: {reason?: DisconnectReason | string}) => void): this
 /** when a new QR is generated, ready for scanning */
 on (event: 'qr', listener: (qr: string) => void): this
 /** when the connection to the phone changes */
 on (event: 'connection-phone-change', listener: (state: {connected: boolean}) => void): this
-/** when a user's presence is updated */
-on (event: 'user-presence-update', listener: (update: PresenceUpdate) => void): this
-/** when a user's status is updated */
-on (event: 'user-status-update', listener: (update: {jid: string, status?: string}) => void): this
+/** when a contact is updated */
+on (event: 'contact-update', listener: (update: WAContactUpdate) => void): this
 /** when a new chat is added */
 on (event: 'chat-new', listener: (chat: WAChat) => void): this
-/** when a chat is updated (archived, deleted, pinned) */
-on (event: 'chat-update', listener: (chat: Partial<WAChat> & { jid: string }) => void): this
-/** when a new message is relayed */
-on (event: 'message-new', listener: (message: WAMessage) => void): this
-/** when a message object itself is updated (receives its media info or is deleted) */
-on (event: 'message-update', listener: (message: WAMessage) => void): this
-/** when a message's status is updated (deleted, delivered, read, sent etc.) */
-on (event: 'message-status-update', listener: (message: WAMessageStatusUpdate) => void): this
+/** when contacts are sent by WA */
+on (event: 'contacts-received', listener: (u: { updatedContacts: Partial<WAContact>[] }) => void): this
+/** when chats are sent by WA, and when all messages are received */
+on (event: 'chats-received', listener: (update: {hasNewChats?: boolean}) => void): this
+/** when all initial messages are received from WA */
+on (event: 'initial-data-received', listener: (update: {chatsWithMissingMessages: { jid: string, count: number }[] }) => void): this
+/** when multiple chats are updated (new message, updated message, deleted, pinned, etc) */
+on (event: 'chats-update', listener: (chats: WAChatUpdate[]) => void): this
+/** when a chat is updated (new message, updated message, read message, deleted, pinned, presence updated etc) */
+on (event: 'chat-update', listener: (chat: WAChatUpdate) => void): this
 /** when participants are added to a group */
-on (event: 'group-participants-add', listener: (update: {jid: string, participants: string[], actor?: string}) => void): this
-/** when participants are removed or leave from a group */
-on (event: 'group-participants-remove', listener: (update: {jid: string, participants: string[], actor?: string}) => void): this
-/** when participants are promoted in a group */
-on (event: 'group-participants-promote', listener: (update: {jid: string, participants: string[], actor?: string}) => void): this
-/** when participants are demoted in a group */
-on (event: 'group-participants-demote', listener: (update: {jid: string, participants: string[], actor?: string}) => void): this
-/** when the group settings is updated */
-on (event: 'group-settings-update', listener: (update: {jid: string, restrict?: string, announce?: string, actor?: string}) => void): this
-/** when the group description is updated */
-on (event: 'group-description-update', listener: (update: {jid: string, description?: string, actor?: string}) => void): this
+on (event: 'group-participants-update', listener: (update: {jid: string, participants: string[], actor?: string, action: WAParticipantAction}) => void): this
+/** when the group is updated */
+on (event: 'group-update', listener: (update: Partial<WAGroupMetadata> & {jid: string, actor?: string}) => void): this
+/** when WA sends back a pong */
+on (event: 'received-pong', listener: () => void): this
+/** when a user is blocked or unblockd */
+on (event: 'blocklist-update', listener: (update: BlocklistUpdate) => void): this
 ```
 
 ## Sending Messages
 
-Send like, all types of messages with a single function:
+**Send all types of messages with a single function:**
+
+### Non-Media Messages
+
 ``` ts
 import { MessageType, MessageOptions, Mimetype } from '@adiwajshing/baileys'
 
 const id = 'abcd@s.whatsapp.net' // the WhatsApp ID 
 // send a simple text!
-conn.sendMessage (id, 'oh hello there', MessageType.text)
+const sentMsg  = await conn.sendMessage (id, 'oh hello there', MessageType.text)
 // send a location!
-conn.sendMessage(id, {degreesLatitude: 24.121231, degreesLongitude: 55.1121221}, MessageType.location)
+const sentMsg  = await conn.sendMessage(id, {degreesLatitude: 24.121231, degreesLongitude: 55.1121221}, MessageType.location)
 // send a contact!
 const vcard = 'BEGIN:VCARD\n' // metadata of the contact card
             + 'VERSION:3.0\n' 
@@ -237,27 +228,60 @@ const vcard = 'BEGIN:VCARD\n' // metadata of the contact card
             + 'ORG:Ashoka Uni;\n' // the organization of the contact
             + 'TEL;type=CELL;type=VOICE;waid=911234567890:+91 12345 67890\n' // WhatsApp ID + phone number
             + 'END:VCARD'
-conn.sendMessage(id, {displayname: "Jeff", vcard: vcard}, MessageType.contact)
-// send a gif
-const buffer = fs.readFileSync("Media/ma_gif.mp4") // load some gif
-const options: MessageOptions = {mimetype: Mimetype.gif, caption: "hello!"} // some metadata & caption
-conn.sendMessage(id, buffer, MessageType.video, options)
-// send an audio file
-const buffer = fs.readFileSync("Media/audio.mp3") // can send mp3, mp4, & ogg -- but for mp3 files the mimetype must be set to ogg
-const options: MessageOptions = {mimetype: Mimetype.ogg} // some metadata (can't have caption in audio)
-conn.sendMessage(id, buffer, MessageType.audio, options)
+const sentMsg  = await conn.sendMessage(id, {displayname: "Jeff", vcard: vcard}, MessageType.contact)
 ```
 
-To note:
+### Media Messages
+
+Sending media (video, stickers, images) is easier & more efficient than ever. 
+- You can specify a buffer, a local url or even a remote url.
+- When specifying a media url, Baileys never loads the entire buffer into memory, it even encrypts the media as a readable stream.
+
+``` ts
+import { MessageType, MessageOptions, Mimetype } from '@adiwajshing/baileys'
+// Sending gifs
+await conn.sendMessage(
+    id, 
+    fs.readFileSync("Media/ma_gif.mp4"), // load a gif and send it
+    MessageType.video, 
+    { mimetype: Mimetype.gif, caption: "hello!" }
+)
+await conn.sendMessage(
+    id, 
+    { url: 'Media/ma_gif.mp4' }, // send directly from local file
+    MessageType.video, 
+    { mimetype: Mimetype.gif, caption: "hello!" }
+)
+
+await conn.sendMessage(
+    id, 
+    { url: 'https://giphy.com/gifs/11JTxkrmq4bGE0/html5' }, // send directly from remote url!
+    MessageType.video, 
+    { mimetype: Mimetype.gif, caption: "hello!" }
+)
+
+// send an audio file
+await conn.sendMessage(
+    id, 
+    { url: "Media/audio.mp3" }, // can send mp3, mp4, & ogg
+    MessageType.audio, 
+    { mimetype: Mimetype.mp4Audio } // some metadata (can't have caption in audio)
+)
+```
+
+
+### Notes
+
 - `id` is the WhatsApp ID of the person or group you're sending the message to. 
     - It must be in the format ```[country code][phone number]@s.whatsapp.net```, for example ```+19999999999@s.whatsapp.net``` for people. For groups, it must be in the format ``` 123456789-123345@g.us ```. 
+    - For broadcast lists it's `[timestamp of creation]@broadcast`.
+    - For stories, the ID is `status@broadcast`.
 - For media messages, the thumbnail can be generated automatically for images & stickers. Thumbnails for videos can also be generated automatically, though, you need to have `ffmpeg` installed on your system.
 - **MessageOptions**: some extra info about the message. It can have the following __optional__ values:
     ``` ts
     const info: MessageOptions = {
         quoted: quotedMessage, // the message you want to quote
-        contextInfo: { forwardingScore: 2, isForwarded: true }, // some random context info 
-        // (can show a forwarded message with this too)
+        contextInfo: { forwardingScore: 2, isForwarded: true }, // some random context info (can show a forwarded message with this too)
         timestamp: Date(), // optional, if you want to manually set the timestamp of the message
         caption: "hello there!", // (for media messages) the caption to send with the media (cannot be sent with stickers though)
         thumbnail: "23GD#4/==", /*  (for location & media messages) has to be a base 64 encoded JPEG if you want to send a custom thumb, 
@@ -265,13 +289,16 @@ To note:
                                     Do not enter this field if you want to automatically generate a thumb
                                 */
         mimetype: Mimetype.pdf, /* (for media messages) specify the type of media (optional for all media types except documents),
-                                        import {Mimetype} from '@adiwajshing/baileys'
+                                    import {Mimetype} from '@adiwajshing/baileys'
                                 */
         filename: 'somefile.pdf', // (for media messages) file name for the media
         /* will send audio messages as voice notes, if set to true */
         ptt: true,
         // will detect links & generate a link preview automatically (default true)
-        detectLinks: true
+        detectLinks: true,
+        /** Should it send as a disappearing messages. 
+         * By default 'chat' -- which follows the setting of the chat */
+        sendEphemeral: 'chat'
     }
     ```
 ## Forwarding Messages
@@ -307,6 +334,7 @@ export enum Presence {
     available = 'available', // "online"
     composing = 'composing', // "typing..."
     recording = 'recording', // "recording..."
+    paused = 'paused' // stopped typing, back to "online"
 }
 ```
 
@@ -355,10 +383,26 @@ setTimeout (() => {
     conn.modifyChat (jid, ChatModification.unmute)
 }, 5000) // unmute after 5 seconds
 
-await conn.deleteChat (jid) // will delete the chat (can be a group or broadcast list as well)
+await conn.modifyChat (jid, ChatModification.delete) // will delete the chat (can be a group or broadcast list as well)
 ```
 
 **Note:** to unmute or unpin a chat, one must pass the timestamp of the pinning or muting. This is returned by the pin & mute functions. This is also available in the `WAChat` objects of the respective chats, as a `mute` or `pin` property.
+
+## Disappearing Messages
+
+``` ts
+const jid = '1234@s.whatsapp.net' // can also be a group
+// turn on disappearing messages
+await conn.toggleDisappearingMessages(
+    jid, 
+    WA_DEFAULT_EPHEMERAL // this is 1 week in seconds -- how long you want messages to appear for
+) 
+// will automatically send as a disappearing message
+await conn.sendMessage(jid, 'Hello poof!', MessageType.text)
+// turn off disappearing messages
+await conn.toggleDisappearingMessages(jid, 0)
+
+```
 
 ## Misc
 
@@ -370,10 +414,11 @@ await conn.deleteChat (jid) // will delete the chat (can be a group or broadcast
     }
     ```
 - To check if a given ID is on WhatsApp
+    Note: this method falls back to using `https://wa.me` to determine whether a number is on WhatsApp in case the WebSocket connection is not open yet.
     ``` ts
-    const id = 'xyz@s.whatsapp.net'
+    const id = '123456'
     const exists = await conn.isOnWhatsApp (id)
-    console.log (`${id} ${exists ? " exists " : " does not exist"} on WhatsApp`)
+    if (exists) console.log (`${id} exists on WhatsApp, as jid: ${exists.jid}`)
     ```
 - To query chat history on a group or with someone
     ``` ts
@@ -384,7 +429,7 @@ await conn.deleteChat (jid) // will delete the chat (can be a group or broadcast
     You can also load the entire conversation history if you want
     ``` ts
     await conn.loadAllMessages ("xyz@c.us", message => console.log("Loaded message with ID: " + message.key.id))
-    console.log("queried all messages") // promise resolves once all messages are retreived
+    console.log("queried all messages") // promise resolves once all messages are retrieved
     ```
 - To get the status of some person
     ``` ts
@@ -415,6 +460,11 @@ await conn.deleteChat (jid) // will delete the chat (can be a group or broadcast
 
     const response2 = await conn.searchMessages ('so cool', '1234@c.us', 25, 1) // search in given chat
     ```
+- To block or unblock user
+    ``` ts
+    await conn.blockUser ("xyz@c.us", "add") // Block user
+    await conn.blockUser ("xyz@c.us", "remove") // Unblock user
+    ```
 Of course, replace ``` xyz ``` with an actual ID. 
 
 ## Groups
@@ -435,6 +485,14 @@ Of course, replace ``` xyz ``` with an actual ID.
     // id & people to make admin (will throw error if it fails)
     await conn.groupMakeAdmin ("abcd-xyz@g.us", ["abcd@s.whatsapp.net", "efgh@s.whatsapp.net"])
     await conn.groupDemoteAdmin ("abcd-xyz@g.us", ["abcd@s.whatsapp.net", "efgh@s.whatsapp.net"]) // demote admins
+    ```
+- To change the group's subject
+    ``` ts
+    await conn.groupUpdateSubject("abcd-xyz@g.us", "New Subject!")
+    ```
+- To change the group's description
+    ``` ts
+    await conn.groupUpdateDescription("abcd-xyz@g.us", "This group has a new description")
     ```
 - To change group settings
     ``` ts
@@ -463,6 +521,17 @@ Of course, replace ``` xyz ``` with an actual ID.
     // Or if you've left the group -- call this
     const metadata2 = await conn.groupMetadataMinimal ("abcd-xyz@g.us") 
     ```
+- To join the group using the invitation code
+    ``` ts
+    const response = await conn.acceptInvite ("xxx")
+    console.log("joined to: " + response.gid)
+    ```
+    Of course, replace ``` xxx ``` with invitation code.
+- To revokes the current invite link of a group
+    ``` ts
+    const response = await conn.revokeInvite ("abcd-xyz@g.us")
+    console.log("new group code: " + response.code)
+    ```
 
 ## Broadcast Lists & Stories
 
@@ -480,7 +549,7 @@ Baileys is written, keeping in mind, that you may require other custom functiona
 
 First, enable the logging of unhandled messages from WhatsApp by setting
 ``` ts
-conn.logger.level = 'unhandled'
+conn.logger.level = 'debug'
 ```
 This will enable you to see all sorts of messages WhatsApp sends in the console. Some examples:
 
@@ -496,7 +565,7 @@ This will enable you to see all sorts of messages WhatsApp sends in the console.
 
     Hence, you can register a callback for an event using the following:
     ``` ts
-    conn.registerCallback (["action", null, "battery"], json => {
+    conn.on (`CB:action,,battery`, json => {
         const batteryLevelStr = json[2][0][1].value
         const batterylevel = parseInt (batteryLevelStr)
         console.log ("battery level: " + batterylevel + "%")
@@ -516,7 +585,7 @@ This will enable you to see all sorts of messages WhatsApp sends in the console.
 
     Following this, one can implement the following callback:
     ``` ts
-    conn.registerCallback (["Conn", "pushname"], json => {
+    conn.on ('CB:Conn,pushname', json => {
         const pushname = json[1].pushname
         conn.user.name = pushname // update on client too
         console.log ("Name updated: " + pushname)

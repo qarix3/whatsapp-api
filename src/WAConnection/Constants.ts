@@ -1,11 +1,14 @@
 import { WA } from '../Binary/Constants'
 import { proto } from '../../WAMessage/WAMessage'
 import { Agent } from 'https'
+import KeyedDB from '@adiwajshing/keyed-db'
+import { URL } from 'url'
 
 export const WS_URL = 'wss://web.whatsapp.com/ws'
 export const DEFAULT_ORIGIN = 'https://web.whatsapp.com'
 
 export const KEEP_ALIVE_INTERVAL_MS = 20*1000
+export const WA_DEFAULT_EPHEMERAL = 7*24*60*60
 
 // export the WAMessage Prototypes
 export { proto as WAMessageProto }
@@ -13,13 +16,19 @@ export type WANode = WA.Node
 export type WAMessage = proto.WebMessageInfo
 export type WAMessageContent = proto.IMessage
 export type WAContactMessage = proto.ContactMessage
+export type WAContactsArrayMessage = proto.ContactsArrayMessage
 export type WAMessageKey = proto.IMessageKey
 export type WATextMessage = proto.ExtendedTextMessage
 export type WAContextInfo = proto.IContextInfo
 export type WAGenericMediaMessage = proto.IVideoMessage | proto.IImageMessage | proto.IAudioMessage | proto.IDocumentMessage | proto.IStickerMessage
-export import WA_MESSAGE_STUB_TYPE = proto.WebMessageInfo.WEB_MESSAGE_INFO_STUBTYPE
-export import WA_MESSAGE_STATUS_TYPE = proto.WebMessageInfo.WEB_MESSAGE_INFO_STATUS
-import KeyedDB from '@adiwajshing/keyed-db'
+export import WA_MESSAGE_STUB_TYPE = proto.WebMessageInfo.WebMessageInfoStubType
+export import WA_MESSAGE_STATUS_TYPE = proto.WebMessageInfo.WebMessageInfoStatus
+
+export type WAInitResponse = {
+    ref: string
+    ttl: number
+    status: 200
+}
 
 export interface WALocationMessage {
     degreesLatitude: number
@@ -38,15 +47,18 @@ export class BaileysError extends Error {
     status?: number
     context: any
 
-    constructor (message: string, context: any) {
+    constructor (message: string, context: any, stack?: string) {
         super (message)
         this.name = 'BaileysError'
         this.status = context.status
         this.context = context
+        if(stack) {
+            this.stack = stack
+        }
     }
 }
-export const TimedOutError = () => new BaileysError ('timed out', { status: 408 })
-export const CancelledError = () => new BaileysError ('cancelled', { status: 500 })
+export const TimedOutError = (stack?: string) => new BaileysError ('timed out', { status: 408 }, stack)
+export const CancelledError = (stack?: string) => new BaileysError ('cancelled', { status: 500 }, stack)
 
 export interface WAQuery {
     json: any[] | WANode
@@ -57,7 +69,12 @@ export interface WAQuery {
     waitForOpen?: boolean
     longTag?: boolean
     requiresPhoneConnection?: boolean
+    startDebouncedTimeout?: boolean
+    maxRetries?: number
 }
+
+export type WAMediaUpload = Buffer | { url: URL | string }
+
 export enum ReconnectMode {
     /** does not reconnect */
     off = 0,
@@ -69,19 +86,12 @@ export enum ReconnectMode {
 export type WALoadChatOptions = {
     searchString?: string
     custom?: (c: WAChat) => boolean
-    loadProfilePicture?: boolean
 }
 export type WAConnectOptions = {
-    /** New QR generation interval, set to null if you don't want to regenerate */
-    regenerateQRIntervalMs?: number
     /** fails the connection if no data is received for X seconds */
     maxIdleTimeMs?: number
     /** maximum attempts to connect */
     maxRetries?: number
-    /** should the chats be waited for */
-    waitForChats?: boolean
-    /** if set to true, the connect only waits for the last message of the chat */
-    waitOnlyForLastMessage?: boolean
     /** max time for the phone to respond to a connectivity test */
     phoneResponseTime?: number
     connectCooldownMs?: number
@@ -91,6 +101,11 @@ export type WAConnectOptions = {
     fetchAgent?: Agent
     /** Always uses takeover for connections */
     alwaysUseTakeover?: boolean
+    /** 
+     * Sometimes WA does not send the chats, 
+     * this keeps pinging the phone to send the chats over
+     * */
+    queryChatsTillReceived?: boolean
 }
 /** from: https://stackoverflow.com/questions/3809401/what-is-a-good-regular-expression-to-match-a-url */
 export const URL_REGEX = /[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&//=]*)?/gi
@@ -152,6 +167,7 @@ export interface WAGroupCreateResponse {
     gid?: string
     participants?: [{ [key: string]: any }]
 }
+export type WAGroupParticipant = (WAContact & { isAdmin: boolean; isSuperAdmin: boolean })
 export interface WAGroupMetadata {
     id: string
     owner: string
@@ -161,16 +177,21 @@ export interface WAGroupMetadata {
     descOwner?: string
     descId?: string
     /** is set when the group only allows admins to change group settings */
-    restrict?: 'true' 
+    restrict?: 'true' | 'false' 
     /** is set when the group only allows admins to write messages */
-    announce?: 'true' 
-    participants: [{ id: string; isAdmin: boolean; isSuperAdmin: boolean }]
+    announce?: 'true' | 'false' 
+    // Baileys modified array
+    participants: WAGroupParticipant[]
 }
 export interface WAGroupModification {
     status: number
     participants?: { [key: string]: any }
 }
-
+export interface WAPresenceData {
+    lastKnownPresence?: Presence
+    lastSeen?: number
+    name?: string
+}
 export interface WAContact {
     verify?: string
     /** name of the contact, the contact has set on their own on WA */
@@ -184,13 +205,12 @@ export interface WAContact {
     /** short name for the contact */
     short?: string
     // Baileys Added
-    lastKnownPresence?: Presence
-    lastSeen?: number
+    imgUrl?: string
 }
 export interface WAUser extends WAContact {
     phone: any
-    imgUrl?: string
 }
+export type WAContactUpdate = Partial<WAContact> & { jid: string, status?: string }
 export interface WAChat {
     jid: string
 
@@ -198,17 +218,26 @@ export interface WAChat {
     /** number of unread messages, is < 0 if the chat is manually marked unread */
     count: number
     archive?: 'true' | 'false'
+    clear?: 'true' | 'false'
     read_only?: 'true' | 'false'
     mute?: string
     pin?: string
     spam: 'false' | 'true'
     modify_tag: string
     name?: string
+    /** when ephemeral messages were toggled on */
+    eph_setting_ts?: string
+    /** how long each message lasts for */
+    ephemeral?: string
     
     // Baileys added properties
     messages: KeyedDB<WAMessage, string>
     imgUrl?: string
+    presences?: { [k: string]: WAPresenceData }
+    metadata?: WAGroupMetadata
 }
+export type WAChatIndex = { index: string, owner: 'true' | 'false', participant?: string }
+export type WAChatUpdate = Partial<WAChat> & { jid: string, hasNewMessage?: boolean }
 export enum WAMetric {
     debugLog = 1,
     queryResume = 2,
@@ -231,6 +260,7 @@ export enum WAMetric {
     queryGroup = 19,
     queryPreview = 20,
     queryEmoji = 21,
+    queryRead = 22,
     queryVCard = 29,
     queryStatus = 30,
     queryStatusUpdate = 31,
@@ -242,28 +272,32 @@ export enum WAMetric {
 export const STORIES_JID = 'status@broadcast'
 
 export enum WAFlag {
+    available = 160,
+    other = 136, // don't know this one
     ignore = 1 << 7,
     acknowledge = 1 << 6,
-    available = 1 << 5,
     unavailable = 1 << 4,
     expires = 1 << 3,
-    skipOffline = 1 << 2,
+    composing = 1 << 2,
+    recording = 1 << 2,
+    paused = 1 << 2
 }
 /** Tag used with binary queries */
 export type WATag = [WAMetric, WAFlag]
 /** set of statuses visible to other people; see updatePresence() in WhatsAppWeb.Send */
 export enum Presence {
-    available = 'available', // "online"
     unavailable = 'unavailable', // "offline"
+    available = 'available', // "online"
     composing = 'composing', // "typing..."
     recording = 'recording', // "recording..."
-    paused = 'paused', // I have no clue
+    paused = 'paused', // stop typing
 }
 /** Set of message types that are supported by the library */
 export enum MessageType {
     text = 'conversation',
     extendedText = 'extendedTextMessage',
     contact = 'contactMessage',
+    contactsArray = 'contactsArrayMessage',
     location = 'locationMessage',
     liveLocation = 'liveLocationMessage',
 
@@ -288,7 +322,9 @@ export enum ChatModification {
     pin='pin',
     unpin='unpin',
     mute='mute',
-    unmute='unmute'
+    unmute='unmute',
+    delete='delete',
+    clear='clear'
 }
 export const HKDFInfoKeys = {
     [MessageType.image]: 'WhatsApp Image Keys',
@@ -333,8 +369,17 @@ export interface MessageOptions {
     uploadAgent?: Agent
     /** If set to true (default), automatically detects if you're sending a link & attaches the preview*/
     detectLinks?: boolean
+    /** Optionally specify the duration of the media (audio/video) in seconds */
+    duration?: number
     /** Fetches new media options for every media file */
     forceNewMediaOptions?: boolean
+    /** Wait for the message to be sent to the server (default true) */
+    waitForAck?: boolean
+    /** Should it send as a disappearing messages. 
+     * By default 'chat' -- which follows the setting of the chat */
+    sendEphemeral?: 'chat' | boolean
+    /** Force message id */
+    messageId?: string
 }
 export interface WABroadcastListInfo {
     status: number
@@ -371,11 +416,10 @@ export interface WAMessageStatusUpdate {
 
 export interface WAOpenResult {
     /** Was this connection opened via a QR scan */
-    newConnection: boolean
+    newConnection?: true
     user: WAUser
-    updatedChats?: {
-        [k: string]: Partial<WAChat>
-    }
+    isNewUser?: true
+    auth: AuthenticationCredentials
 }
 
 export enum GroupSettingChange {
@@ -388,6 +432,10 @@ export interface PresenceUpdate {
     t?: string
     type?: Presence
     deny?: boolean
+}
+export interface BlocklistUpdate {
+    added?: string[]
+    removed?: string[]
 }
 // path to upload the media
 export const MediaPathMap = {
@@ -405,31 +453,21 @@ export const MimetypeMap = {
     audioMessage: Mimetype.ogg,
     stickerMessage: Mimetype.webp,
 }
-export interface WASendMessageResponse {
-    status: number
-    messageID: string
-    message: WAMessage
-}
+export type WAParticipantAction = 'add' | 'remove' | 'promote' | 'demote'
 export type BaileysEvent = 
     'open' | 
     'connecting' |
     'close' |
-    'intermediate-close' |
+    'ws-close' | 
     'qr' |
     'connection-phone-change' |
-    'user-presence-update' |
-    'user-status-update' |
+    'contacts-received' |
+    'chats-received' |
+    'initial-data-received' |
     'chat-new' |
     'chat-update' |
-    'message-new' |
-    'message-update' |
-    'message-status-update' |
-    'group-participants-add' |
-    'group-participants-remove' |
-    'group-participants-promote' |
-    'group-participants-demote' |
-    'group-settings-update' |
-    'group-description-update' |
+    'group-participants-update' |
+    'group-update' |
     'received-pong' |
-    'credentials-updated' |
-    'connection-validated'
+    'blocklist-update' |
+    'contact-update'
